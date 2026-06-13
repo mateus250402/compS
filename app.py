@@ -75,7 +75,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Layout Principal: Header e Logo
+
 col_logo, col_title = st.columns([1, 15])
 with col_logo:
     st.markdown(
@@ -101,7 +101,7 @@ if "messages" not in st.session_state:
 # Layout de Colunas: Esquerda (Documentos) | Direita (Chat)
 col_doc, col_chat = st.columns([1.1, 1])
 
-# Altura para o Chat (Mais comprido que o PDF para melhor experiência)
+# Altura para o Chat
 CHAT_HEIGHT = 800
 PDF_HEIGHT = 700
 
@@ -161,7 +161,27 @@ with col_doc:
 with col_chat:
     st.markdown("### 💬 Assistente")
 
-    # Container do Chat mais comprido
+    comando_clicado = None
+    
+    if uploaded_files:
+        st.markdown("<p style='font-size: 0.85rem; margin-bottom: 5px; color: #888;'>Sugestões de comandos:</p>", unsafe_allow_html=True)
+        
+        btn_col1, btn_col2, btn_col3 = st.columns(3)
+        
+        with btn_col1:
+            if st.button("📝 Resumir documento", use_container_width=True):
+                comando_clicado = "Faça um resumo estruturado dos pontos principais deste documento."
+        
+        with btn_col2:
+            if st.button("🔍 Cláusulas de risco", use_container_width=True):
+                comando_clicado = "Procure por cláusulas dúbias, ambíguas ou que possam ser mal interpretadas prejudicando as partes."
+                
+        with btn_col3:
+            if st.button("⏳ Prazos e Vigência", use_container_width=True):
+                comando_clicado = "Quais são os prazos principais, datas de vencimento e regras de vigência/renovação?"
+                
+        st.markdown("<div style='margin-bottom: 15px;'></div>", unsafe_allow_html=True)
+
     chat_container = st.container(height=CHAT_HEIGHT)
 
     with chat_container:
@@ -174,30 +194,70 @@ with col_chat:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    # Input de chat
+    # Input de chat tradicional
     input_disabled = not uploaded_files
     placeholder_text = (
         "Pergunte algo sobre os documentos..."
         if uploaded_files
         else "Envie um documento primeiro"
     )
+    
+    user_input = st.chat_input(placeholder_text, disabled=input_disabled)
 
-    if user_input := st.chat_input(placeholder_text, disabled=input_disabled):
-        st.session_state.messages.append({"role": "user", "content": user_input})
+    entrada_final = comando_clicado if comando_clicado else user_input
+
+    if entrada_final:
+        st.session_state.messages.append({"role": "user", "content": entrada_final})
         with chat_container:
             with st.chat_message("user"):
-                st.markdown(user_input)
+                st.markdown(entrada_final)
 
             with st.chat_message("assistant"):
-                if len(uploaded_files) > 1:
-                    response = "Analisando os múltiplos documentos carregados... Identifiquei os pontos chave para sua pergunta."
-                else:
-                    response = "Analisando o documento... Estou pronto para explicar os termos jurídicos para você."
+                if st.session_state.vector_db is not None:
+                    with st.spinner("Analisando documentos..."):
 
-                st.markdown(response)
+                        # 1. BUSCA SEMÂNTICA
+                        docs_relevantes = st.session_state.vector_db.similarity_search(entrada_final, k=3)
+                        contexto_str = "\n\n".join([doc.page_content for doc in docs_relevantes])
+                        
+                        fontes = set([doc.metadata.get("source", "Desconhecido") for doc in docs_relevantes])
+                        
+                        # 2. PROMPT
+                        prompt = f"""
+                        Você é o JuridicAI, um assistente especializado em traduzir termos jurídicos complexos de forma clara e simples para o usuário.
+                        Use EXCLUSIVAMENTE o contexto fornecido abaixo para responder à pergunta. 
+                        Se a resposta não puder ser encontrada no contexto, responda exatamente: "Não encontrei essa informação nos documentos carregados."
+                        Não invente fatos ou cláusulas fora do contexto.
+
+                        CONTEXTO DOS DOCUMENTOS:
+                        {contexto_str}
+
+                        PERGUNTA DO USUÁRIO:
+                        {entrada_final}
+                        """
+                        
+                        try:
+                            # 3. GEMINI
+                            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
+                            response_obj = llm.invoke(prompt)
+                            response = response_obj.content
+                            
+                            fontes_str = f"\n\n*📑 Fontes consultadas: {', '.join(fontes)}*"
+                            response_completa = response + fontes_str
+                            
+                        except Exception as e:
+                            response_completa = f"⚠️ Erro ao consultar a inteligência artificial: {e}"
+                else:
+                    response_completa = "⚠️ A base de dados não pôde ser sincronizada ou inicializada corretamente."
+
+                # Exibe e guarda no histórico
+                st.markdown(response_completa)
                 st.session_state.messages.append(
-                    {"role": "assistant", "content": response}
+                    {"role": "assistant", "content": response_completa}
                 )
+                
+                # Força o Streamlit a recarregar a página para atualizar o chat_container visualmente
+                st.rerun()
 
     if st.session_state.messages:
         st.button(
